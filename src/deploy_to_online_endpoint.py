@@ -1,10 +1,8 @@
-from azure.identity import DefaultAzureCredential
+from azure.identity import AzureCliCredential
 from azure.ai.ml import MLClient
-from azure.ai.ml.entities import ManagedOnlineEndpoint, ManagedOnlineDeployment, Model
-from azure.ai.ml.constants import AssetTypes
+from azure.ai.ml.entities import ManagedOnlineEndpoint, ManagedOnlineDeployment
 
 import argparse
-import datetime
 
 
 def parse_args():
@@ -15,12 +13,13 @@ def parse_args():
     parser.add_argument("--workspace", dest="workspace", required=True)
     parser.add_argument("--endpoint-name", dest="endpoint_name", default="diabetes-endpoint")
     parser.add_argument("--deployment-name", dest="deployment_name", default="blue")
+    parser.add_argument("--model-name", dest="model_name", default="diabetes-model")
 
     return parser.parse_args()
 
 
 def get_ml_client(subscription_id: str, resource_group: str, workspace: str) -> MLClient:
-    credential = DefaultAzureCredential()
+    credential = AzureCliCredential()
     return MLClient(
         credential=credential,
         subscription_id=subscription_id,
@@ -32,30 +31,33 @@ def get_ml_client(subscription_id: str, resource_group: str, workspace: str) -> 
 def ensure_endpoint(ml_client: MLClient, endpoint_name: str) -> ManagedOnlineEndpoint:
     try:
         endpoint = ml_client.online_endpoints.get(name=endpoint_name)
+        if endpoint.provisioning_state in ("Failed", "Deleting", "Canceled"):
+            print(f"Endpoint '{endpoint_name}' is in state '{endpoint.provisioning_state}'. Deleting and recreating...")
+            ml_client.online_endpoints.begin_delete(name=endpoint_name).result()
+            raise ValueError("Endpoint deleted, recreating")
+        print(f"Check: endpoint {endpoint_name} exists")
         return endpoint
+    except ValueError:
+        pass
     except Exception:
-        unique_suffix = datetime.datetime.now().strftime("%m%d%H%M%f")
-        name = endpoint_name or f"endpoint-{unique_suffix}"
+        pass
 
-        endpoint = ManagedOnlineEndpoint(
-            name=name,
-            description="Online endpoint for MLflow diabetes model",
-            auth_mode="key",
-        )
-
-        return ml_client.begin_create_or_update(endpoint).result()
+    endpoint = ManagedOnlineEndpoint(
+        name=endpoint_name,
+        description="Online endpoint for MLflow diabetes model",
+        auth_mode="key",
+    )
+    return ml_client.begin_create_or_update(endpoint).result()
 
 
 def create_or_update_deployment(
     ml_client: MLClient,
     endpoint_name: str,
     deployment_name: str,
+    model_name: str,
 ) -> ManagedOnlineDeployment:
-    model = Model(
-        path="./model",
-        type=AssetTypes.MLFLOW_MODEL,
-        description="MLflow diabetes classification model",
-    )
+    model = ml_client.models.get(name=model_name, label="latest")
+    print(f"Deploying model: {model.name} version {model.version}")
 
     deployment = ManagedOnlineDeployment(
         name=deployment_name,
@@ -93,6 +95,7 @@ def main() -> None:
         ml_client=ml_client,
         endpoint_name=endpoint.name,
         deployment_name=args.deployment_name,
+        model_name=args.model_name,
     )
     print(f"Deployment state: {deployment.provisioning_state}")
 
